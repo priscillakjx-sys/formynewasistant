@@ -9,11 +9,26 @@
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="logo.svg">
 <meta name="theme-color" content="#efefed">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=20261116-bento2">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+
+<div class="startup-loader" id="startupLoader" role="status" aria-live="polite" aria-label="Getting your budget ready">
+  <div class="startup-loader-art" aria-hidden="true">
+    <div class="startup-loader-glow"></div>
+    <div class="startup-loader-shape"><img src="logo.svg" alt=""></div>
+    <span class="startup-loader-emoji emoji-one">💸</span>
+    <span class="startup-loader-emoji emoji-two">✨</span>
+    <span class="startup-loader-emoji emoji-three">💰</span>
+  </div>
+  <div class="startup-loader-copy">
+    <strong>Getting your budget ready</strong>
+    <span>Syncing your latest spending</span>
+    <div class="startup-loader-progress"><i></i></div>
+  </div>
+</div>
 
 <!-- Setup: connect to Supabase (or try the local demo) -->
 <section class="gate hidden" id="setup">
@@ -62,6 +77,7 @@
     <button id="navMore" class="mobile-more" aria-label="More"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg><span>More</span></button>
     <button data-view="month" class="desktop-report" aria-label="Month"><svg viewBox="0 0 24 24"><path d="M4 6a2 2 0 012-2h12a2 2 0 012 2v13a2 2 0 01-2 2H6a2 2 0 01-2-2zM4 10h16M9 2v4M15 2v4"/></svg><span>Month</span></button>
     <button data-view="year" class="desktop-report" aria-label="Year"><svg viewBox="0 0 24 24"><path d="M5 20V11M10 20V5M15 20v-6M20 20V9"/></svg><span>Year</span></button>
+    <button data-view="installments" class="desktop-report" aria-label="Instalments"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 9h8M8 13h5M8 17h3"/></svg><span>Instalments</span></button>
     <div class="navfoot desk"><span id="liveTag"></span><button id="gear2">Settings</button></div>
   </nav>
 </div>
@@ -70,7 +86,7 @@
 <div class="toast" id="toast"></div>
 
 <script src="config.js"></script>
-<script src="db.js"></script>
-<script src="app.js"></script>
+<script src="db.js?v=20261116-bento2"></script>
+<script src="app.js?v=20261116-bento2"></script>
 </body>
 </html>

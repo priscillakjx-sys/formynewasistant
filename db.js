@@ -61,6 +61,10 @@ class SupabaseDB {
   }
   async signOut() { await this.sb.auth.signOut(); }
   ok({ data, error }) { if (error) throw error; return data; }
+  planKey() { return `spend-plans-v1:${this.user?.id || 'local'}`; }
+  readPlans() { try { return JSON.parse(localStorage.getItem(this.planKey())) || []; } catch { return []; } }
+  writePlans(plans) { localStorage.setItem(this.planKey(), JSON.stringify(plans)); }
+  localId() { return crypto.randomUUID ? crypto.randomUUID() : 'plan-' + Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
   async load() {
     // First visit: create profile. Only the request that actually inserted it seeds categories (race-safe across tabs).
@@ -75,11 +79,20 @@ class SupabaseDB {
       const page = this.ok(await this.sb.from('transactions').select('*').order('occurred_on', { ascending: false }).order('created_at', { ascending: false }).range(from, from + 999));
       transactions.push(...page); if (page.length < 1000) break;
     }
-    return { profile: num(profile), categories: categories.map(num), transactions: transactions.map(num) };
+    return { profile: num(profile), categories: categories.map(num), transactions: transactions.map(num), plans: this.readPlans().map(num) };
   }
-  async insert(t, row) { return num(this.ok(await this.sb.from(t).insert(row).select().single())); }
-  async update(t, id, patch) { return num(this.ok(await this.sb.from(t).update(patch).eq('id', id).select().single())); }
-  async remove(t, id) { this.ok(await this.sb.from(t).delete().eq('id', id)); }
+  async insert(t, row) {
+    if (t === 'plans') { const plans = this.readPlans(), saved = { ...row, id: this.localId(), created_at: new Date().toISOString() }; plans.push(saved); this.writePlans(plans); return num(saved); }
+    return num(this.ok(await this.sb.from(t).insert(row).select().single()));
+  }
+  async update(t, id, patch) {
+    if (t === 'plans') { const plans = this.readPlans(), i = plans.findIndex(x => x.id === id); if (i < 0) throw new Error('Plan not found'); plans[i] = { ...plans[i], ...patch }; this.writePlans(plans); return num(plans[i]); }
+    return num(this.ok(await this.sb.from(t).update(patch).eq('id', id).select().single()));
+  }
+  async remove(t, id) {
+    if (t === 'plans') { this.writePlans(this.readPlans().filter(x => x.id !== id)); return; }
+    this.ok(await this.sb.from(t).delete().eq('id', id));
+  }
   async saveProfile(patch) { return num(this.ok(await this.sb.from('profiles').update({ ...patch, updated_at: new Date().toISOString() }).eq('user_id', this.user.id).select().single())); }
   subscribe(onChange, onStatus) {
     if (this.ch) this.sb.removeChannel(this.ch);
@@ -113,9 +126,20 @@ class DemoDB {
         if (rnd() < p) tx.push({ type: 'expense', amount: Math.round((lo + rnd() * (hi - lo)) * 100) / 100, category_id: by(n), note, occurred_on: d(day) });
     }
     const transactions = tx.map((t, i) => ({ ...t, id: this.id(), created_at: new Date(Date.now() - i * 1000).toISOString() }));
-    const s = { profile: { ...DEFAULT_PROFILE }, categories, transactions }; this.write(s); return s;
+    const monthStart = new Date(today.getFullYear(), today.getMonth() - 6, 1);
+    const start = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}-05`;
+    const plans = [
+      { id: this.id(), kind: 'instalment', name: 'Laptop', amount: 180, category_id: by('Shopping'), frequency: 'monthly', total_payments: 12, paid_before: 7, start_date: start, auto: false, auto_from: start, note: 'Work setup', created_at: new Date().toISOString() },
+      { id: this.id(), kind: 'instalment', name: 'Phone', amount: 95, category_id: by('Bills'), frequency: 'monthly', total_payments: 24, paid_before: 10, start_date: start, auto: false, auto_from: start, note: 'Device plan', created_at: new Date().toISOString() },
+    ];
+    const s = { profile: { ...DEFAULT_PROFILE }, categories, transactions, plans }; this.write(s); return s;
   }
-  async load() { const s = this.read() || this.seed(); return JSON.parse(JSON.stringify(s)); }
+  async load() {
+    const s = this.read() || this.seed(); s.plans = s.plans || [];
+    const added = autoPostPlans(s.plans, s.transactions, () => this.id());
+    s.transactions.unshift(...added); this.write(s);
+    return JSON.parse(JSON.stringify(s));
+  }
   emit(table, eventType, row, old) { const msg = { table, eventType, new: row, old: old || { id: row?.id } }; this.bc?.postMessage(msg); }
   async insert(t, row) { const s = this.read(); const r = { ...row, id: this.id(), created_at: new Date().toISOString() }; s[t].unshift(r); this.write(s); this.emit(t, 'INSERT', r); return r; }
   async update(t, id, patch) { const s = this.read(); const i = s[t].findIndex(x => x.id === id); if (i < 0) throw new Error('Not found'); s[t][i] = { ...s[t][i], ...patch }; this.write(s); this.emit(t, 'UPDATE', s[t][i]); return s[t][i]; }
@@ -163,7 +187,7 @@ class SheetsDB {
   async verify() { return this.sendCode(); }
   async load() {
     const j = await this.call('load');
-    this.version = j.version; const data = { profile: j.profile, categories: j.categories, transactions: j.transactions };
+    this.version = j.version; const data = { profile: j.profile, categories: j.categories, transactions: j.transactions, plans: j.plans || [] };
     this.snap = JSON.parse(JSON.stringify(data)); return data;
   }
   track(v) { if (v === this.version + 1) this.version = v; } // our own write; anything else is picked up by the poll
@@ -179,13 +203,14 @@ class SheetsDB {
         const { version } = await this.call('version'); onStatus(true);
         if (version !== this.version) {
           const before = this.snap, j = await this.call('load'); this.version = j.version;
-          for (const t of ['transactions', 'categories']) {
+          j.plans = j.plans || [];
+          for (const t of ['transactions', 'categories', 'plans']) {
             const old = new Map((before?.[t] || []).map(x => [x.id, x])), now = new Map(j[t].map(x => [x.id, x]));
             for (const [id, x] of now) if (!old.has(id)) onChange(t, { eventType: 'INSERT', new: x }); else if (JSON.stringify(old.get(id)) !== JSON.stringify(x)) onChange(t, { eventType: 'UPDATE', new: x });
             for (const id of old.keys()) if (!now.has(id)) onChange(t, { eventType: 'DELETE', old: { id } });
           }
           if (JSON.stringify(before?.profile) !== JSON.stringify(j.profile)) onChange('profiles', { eventType: 'UPDATE', new: j.profile });
-          this.snap = { profile: j.profile, categories: j.categories, transactions: j.transactions };
+          this.snap = { profile: j.profile, categories: j.categories, transactions: j.transactions, plans: j.plans };
         }
       } catch (e) { onStatus(false); console.warn('Sheet sync:', e.message); }
       this.polling = false;
@@ -196,4 +221,34 @@ class SheetsDB {
   }
 }
 
-window.SpendDB = { SupabaseDB, DemoDB, SheetsDB, DEFAULT_CATEGORIES };
+/* ---------------- plans: shared date logic (mirrors google-sheets/Code.gs) ---------------- */
+const isoUTC = d => d.toISOString().slice(0, 10);
+function occDate(p, k) {
+  const [y, m, d] = String(p.start_date).split('-').map(Number);
+  if (p.frequency === 'weekly') return isoUTC(new Date(Date.UTC(y, m - 1, d + 7 * k)));
+  const months = (p.frequency === 'yearly' ? 12 : 1) * k;
+  const first = new Date(Date.UTC(y, m - 1 + months, 1));
+  const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate();
+  return isoUTC(new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), Math.min(d, last))));
+}
+const localToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const dayGap = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 864e5;
+// Demo-mode equivalent of Code.gs autoPost(): returns the new transactions it created
+function autoPostPlans(plans, tx, newId) {
+  const today = localToday(), ids = new Set(tx.map(t => String(t.id))), add = [];
+  for (const p of plans) {
+    if (!p.auto || !(p.amount > 0)) continue;
+    const n = p.kind === 'instalment' ? Number(p.total_payments) || 0 : 1200, from = p.auto_from || today, win = p.frequency === 'weekly' ? 3 : 10;
+    for (let k = 0; k < n; k++) {
+      const d = occDate(p, k); if (d > today) break;
+      if (d < from || (p.kind === 'instalment' && k < (p.paid_before || 0))) continue;
+      const id = `auto-${p.id}-${k}`; if (ids.has(id)) continue;
+      if (tx.concat(add).some(t => dayGap(t.occurred_on, d) <= win && (t.plan_id === p.id || (!t.plan_id && t.category_id === p.category_id && Math.abs(t.amount - p.amount) <= 0.1)))) continue;
+      add.push({ id, type: 'expense', amount: p.amount, category_id: p.category_id, occurred_on: d, plan_id: p.id, note: p.name + (p.kind === 'instalment' ? ` ${k + 1}/${n}` : ''), created_at: new Date().toISOString() });
+      ids.add(id);
+    }
+  }
+  return add;
+}
+
+window.SpendDB = { SupabaseDB, DemoDB, SheetsDB, DEFAULT_CATEGORIES, occDate };
