@@ -24,15 +24,15 @@ const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const C_SPENT = '#8E83F5', C_INCOME = '#70B8EA';
-const TITLES = { home: 'Dashboard', month: 'Month', year: 'Year', insights: 'Insights', history: 'History' };
+const TITLES = { home: 'Dashboard', month: 'Month', year: 'Year', insights: 'Insights', history: 'History', installments: 'Instalments' };
 
 /* ---------- state ---------- */
 const S = {
   db: null, started: false, live: false,
-  profile: null, categories: [], transactions: [], catMap: new Map(),
+  profile: null, categories: [], transactions: [], plans: [], catMap: new Map(),
   view: 'home', period: 'month', anchor: today(),
   hist: { type: 'all', cat: null, q: '', limit: 150 },
-  sheet: null, draft: null, catDraft: null, catReturn: null, armed: null, sugg: [],
+  sheet: null, draft: null, catDraft: null, catReturn: null, planDraft: null, armed: null, sugg: [],
 };
 
 /* ---------- helpers ---------- */
@@ -250,11 +250,11 @@ function catList(byCat, total, onclick = 'cat') {
   const rows = [...byCat].sort((a, b) => b[1] - a[1]); const max = rows[0]?.[1] || 1;
   return rows.map(([id, v]) => { const c = cat(id); return `<button class="cat" data-act="${onclick}" data-id="${id ?? ''}">${icoHTML(c)}<div class="track"><div class="t"><span>${esc(c.name)}</span><span>${money(v)} · ${Math.round(v / total * 100)}%</span></div><div class="p"><span ${w(v / max * 100)} data-bg="${esc(c.color)}"></span></div></div></button>`; }).join('');
 }
-function categorySummary(byCat, total, period, anchor) {
+function categorySummary(byCat, total, period, anchor, maxRows = Infinity) {
   const rows = [...byCat].map(([id, value]) => {
     const c = cat(id), limit = c.budget > 0 ? budgetFor(c.budget, period, anchor) : 0;
     return { id, value, c, limit, ratio: limit ? value / limit : 0 };
-  }).sort((a, b) => (b.limit ? b.ratio + 1 : b.value / total) - (a.limit ? a.ratio + 1 : a.value / total));
+  }).sort((a, b) => (b.limit ? b.ratio + 1 : b.value / total) - (a.limit ? a.ratio + 1 : a.value / total)).slice(0, maxRows);
   return `<div class="category-summary">${rows.map(({ id, value, c, limit, ratio }) => {
     const pct = total ? Math.round(value / total * 100) : 0;
     const state = !limit ? 'neutral' : ratio > 1 ? 'over' : ratio >= .8 ? 'warn' : 'ok';
@@ -270,12 +270,47 @@ function categorySummary(byCat, total, period, anchor) {
 }
 const txRow = t => { const c = cat(t.category_id); return `<button class="tx" data-act="tx" data-id="${t.id}">${icoHTML(c, 'sm')}<div class="w"><b>${esc(t.note || c.name)}</b><small>${t.note ? esc(c.name) : t.type === 'income' ? 'Income' : ''}${S.view === 'home' ? ' · ' + dayLabel(parse(t.occurred_on)) : ''}</small></div><span class="amt ${t.type === 'income' ? 'inc' : ''}">${t.type === 'income' ? '+' : '−'}${money(t.amount)}</span></button>`; };
 
+function planStats(p) {
+  const total = Math.max(1, Number(p.total_payments) || 1);
+  const logged = S.transactions.filter(t => t.plan_id === p.id).length;
+  const paid = Math.min(total, Math.max(0, Number(p.paid_before) || 0) + logged);
+  const remaining = Math.max(0, total - paid), pct = Math.round(paid / total * 100);
+  const next = remaining ? SpendDB.occDate(p, paid) : null;
+  return { total, paid, remaining, pct, next, left: remaining * Number(p.amount || 0) };
+}
+function planDateLabel(value) {
+  if (!value) return 'Complete';
+  const d = parse(value), now = today(), prefix = d < now ? 'Due ' : 'Next ';
+  return `${prefix}${d.getDate()} ${MON[d.getMonth()]}${d.getFullYear() !== now.getFullYear() ? ` ${d.getFullYear()}` : ''}`;
+}
+function planRow(p, compact = false) {
+  const c = cat(p.category_id), x = planStats(p), done = !x.remaining;
+  return `<button class="plan-row ${compact ? 'compact' : ''}" data-act="plan" data-id="${p.id}">
+    ${icoHTML(c, 'sm')}
+    <span class="plan-copy"><b>${esc(p.name)}</b><small>${done ? 'All payments completed' : `${x.paid} of ${x.total} paid · ${planDateLabel(x.next)}`}</small></span>
+    <span class="plan-status ${done ? 'done' : ''}">${done ? 'Paid off' : `${x.paid}/${x.total} paid`}</span>
+    <span class="plan-amount"><b>${money(p.amount, 0)}</b><small>${done ? 'finished' : 'per month'}</small></span>
+    <span class="plan-progress"><i style="width:${x.pct}%"></i></span>
+  </button>`;
+}
+function planTotals(plans = S.plans) {
+  return plans.reduce((a, p) => { const x = planStats(p); a.paid += x.paid; a.total += x.total; a.left += x.left; if (x.next && (!a.next || x.next < a.next)) a.next = x.next; return a; }, { paid: 0, total: 0, left: 0, next: null });
+}
+function installmentCard() {
+  const active = S.plans.filter(p => planStats(p).remaining), totals = planTotals(active), pct = totals.total ? Math.round(totals.paid / totals.total * 100) : 0;
+  return `<section class="box plans-card">
+    <h2><span class="box-title">Instalment plans</span><button data-act="goplans">View all →</button></h2>
+    ${active.length ? `<div class="plan-card-summary"><span><strong>${totals.paid}</strong> of ${totals.total} payments complete</span><b>${pct}%</b></div><div class="plan-overall-bar"><i style="width:${pct}%"></i></div><div class="plan-card-meta"><span>${money(totals.left, 0)} remaining</span><span>${planDateLabel(totals.next)}</span></div>${active.slice(0, 2).map(p => planRow(p, true)).join('')}`
+      : `<div class="plan-empty"><span>🧾</span><b>No instalment plans yet</b><p>Track what is paid, what remains, and the next due date.</p><button class="btn sec2" data-act="newplan">Add a plan</button></div>`}
+  </section>`;
+}
+
 function quickAdd(st) {
   const counts = new Map();
   S.transactions.filter(t => t.type === 'expense').slice(0, 120).forEach(t => counts.set(t.category_id, (counts.get(t.category_id) || 0) + 1));
   const exp = S.categories.filter(c => c.type === 'expense')
     .sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0) || (st.byCat.get(b.id) || 0) - (st.byCat.get(a.id) || 0)).slice(0, 4);
-  return `<section class="box quick"><h2>Quick add <span style="text-transform:none;letter-spacing:0;font-weight:500">your frequent categories</span></h2>
+  return `<section class="box quick"><h2><span class="box-title">Quick add</span><span class="box-meta">your frequent categories</span></h2>
     <div class="qgrid">${exp.map(c => `<button class="qt" style="--cat:${esc(c.color)}" data-act="quick" data-id="${c.id}"><span class="qt-emoji" aria-hidden="true">${emojiFor(c)}</span><div><b>${esc(c.name)}</b><small>${money(st.byCat.get(c.id) || 0, 0)}</small></div></button>`).join('')}
       <button class="qt inc" data-act="quickinc"><span class="qt-emoji" aria-hidden="true">💰</span><div><b>Income</b><small>${money(st.income, 0)}</small></div></button>
       <button class="qt more" data-act="quickmore"><span class="qt-emoji" aria-hidden="true">＋</span><div><b>More</b><small>Choose any category</small></div></button>
@@ -292,6 +327,7 @@ function tipCard(A) {
 function homeView() {
   const p = S.period, r = range(p, S.anchor), st = stats(r), t = today();
   const mst = p === 'month' ? st : stats(range('month', S.anchor));
+  const analysis = analyse(S.anchor);
   const budget = budgetFor(S.profile.monthly_budget, p, S.anchor) || 0;
   const ratio = budget > 0 ? st.spent / budget : 0;
   const elapsed = t < r.start ? 0 : t > r.end ? daysIn(r) : Math.round((t - r.start) / 864e5) + 1;
@@ -299,47 +335,79 @@ function homeView() {
   const isCurrent = t >= r.start && t <= r.end;
   const daysLeft = t < r.start ? daysIn(r) : t > r.end ? 0 : Math.max(0, daysIn(r) - elapsed);
   const safeDaily = budget && left > 0 && isCurrent ? left / Math.max(1, daysLeft) : 0;
-  const top3 = [...st.byCat].sort((a, b) => b[1] - a[1]).slice(0, 3);
   const bigTxt = budget ? money(Math.abs(left), 0) : money(st.spent, 0);
   const bigLabel = !budget ? 'Spent so far' : left >= 0 ? 'Left to spend' : 'Over budget';
-  const periodTitle = p === 'month' ? 'Monthly' : p === 'week' ? 'Weekly' : 'Daily';
   const status = !budget ? 'Set a budget' : ratio > 1 ? 'Needs attention' : ratio > .8 ? 'Nearly there' : 'On track';
-  const blobs = st.spent ? top3.map(([id, value], index) => {
-    const c = cat(id), pct = Math.round(value / st.spent * 100);
-    return `<button class="spend-blob blob-${index + 1}" style="--cat:${esc(c.color)}" data-act="cat" data-id="${id ?? ''}" aria-label="${esc(c.name)}: ${pct}%">
-      <svg class="blob-shape" viewBox="0 0 220 200" aria-hidden="true"><path class="blob-fill" d="${BLOB_PATHS[index]}"/><path class="blob-outline" d="${BLOB_PATHS[index]}"/></svg>
-      <span class="blob-emoji" aria-hidden="true">${emojiFor(c)}</span><strong>${pct}%</strong><small>${esc(c.name)} · ${money(value, 0)}</small>
-    </button>`;
-  }).join('') : `<div class="spend-blob blob-empty"><svg class="blob-shape" viewBox="0 0 220 200" aria-hidden="true"><path class="blob-fill" d="${BLOB_PATHS[0]}"/><path class="blob-outline" d="${BLOB_PATHS[0]}"/></svg><span class="blob-emoji">✨</span><strong>0%</strong><small>Your category mix will appear here</small></div>`;
+  const daily = Array(daysIn(r)).fill(0);
+  st.tx.forEach(x => {
+    if (x.type !== 'expense') return;
+    const index = Math.round((parse(x.occurred_on) - r.start) / 864e5);
+    if (index >= 0 && index < daily.length) daily[index] += x.amount;
+  });
+  const chartGroups = daily.map((value, index) => {
+    const date = addDays(r.start, index);
+    return { x: p === 'month' ? date.getDate() : DOW[date.getDay()][0], vals: [value], tip: `${dayLabel(date)}|${money(value)} spent` };
+  });
+  const dailyBudget = budget ? budget / Math.max(1, daily.length) : 0;
+  const averageDaily = elapsed ? st.spent / elapsed : 0;
+  const projection = p === 'month' && analysis.isCur ? analysis.projected : st.spent;
+  const projectionCopy = p === 'month' && analysis.isCur ? 'Projected this month' : 'Recorded this period';
+  const primaryCat = [...st.byCat].sort((a, b) => b[1] - a[1])[0];
+  const primary = primaryCat ? cat(primaryCat[0]) : null;
+  const transactionCount = st.tx.filter(x => x.type === 'expense').length;
 
   return `<div class="grid home">
-  <div class="hero ${ratio > 1 ? 'over' : ''}">
-    <div class="hero-kicker"><span>Personal finance · ${rangeLabel(p, r)}</span><span>${status}</span></div>
-    <div class="seg">${['month', 'week', 'day'].map(x => `<b class="${p === x ? 'on' : ''}" data-act="period" data-p="${x}">${x[0].toUpperCase() + x.slice(1)}</b>`).join('')}</div>
-    <div class="hero-heading"><span>${periodTitle}</span><span>Budget</span></div>
-    <div class="hero-total"><span>${bigLabel}</span><strong class="${left < 0 ? 'negative' : ''}" style="${bigTxt.length > 8 ? 'font-size:' + Math.max(38, 58 - (bigTxt.length - 8) * 5) + 'px' : ''}">${bigTxt}</strong><small>${budget ? `${money(st.spent, 0)} spent of ${money(budget, 0)} · ${Math.round(ratio * 100)}% used` : 'Set a budget to see what is safe to spend'}</small></div>
-    <div class="blob-label"><span>Top spending categories</span><button data-act="goinsights">View all</button></div>
-    <div class="blob-field">${blobs}</div>
-    <div class="hero-budget"><span style="width:${budget ? Math.min(ratio, 1) * 100 : 0}%"></span></div>
-    <div class="meta">
-      ${p === 'day' ? `<span><em>${st.tx.filter(x => x.type === 'expense').length}</em> purchases</span>` : `<span><em>${money(elapsed ? st.spent / elapsed : 0, 0)}</em> average spent/day</span>`}
-      <span>${budget && left >= 0 ? isCurrent ? `<em>${money(safeDaily, 0)}</em> safe per remaining day` : `<em>${money(left, 0)}</em> unspent in this period` : budget ? `<em>${money(-left, 0)}</em> needs adjusting` : '<em>Set budget</em> in settings'}</span>
-    </div>
-    <div class="hero-stats">
-      <div><span>Income</span><b>${money(st.income, 0)}</b></div>
-      <div><span>Transactions</span><b>${st.tx.length}</b></div>
-      <div><span>${p === 'day' ? 'Largest spend' : isCurrent ? 'Safe to spend/day' : 'Unspent'}</span><b>${p === 'day' ? money(Math.max(0, ...st.tx.filter(x => x.type === 'expense').map(x => x.amount)), 0) : budget ? money(isCurrent ? safeDaily : Math.max(left, 0), 0) : '—'}</b></div>
-    </div>
-    <button class="recap" data-act="recap">💬 Recap the ${p}? <span>Ask</span></button>
-  </div>
+  <section class="home-metrics" aria-label="Budget overview">
+    <article class="overview-card overview-primary ${left < 0 ? 'over' : ''}">
+      <div class="overview-card-top"><span>${bigLabel}</span><b>${status}</b></div>
+      <strong>${bigTxt}</strong>
+      <small>${budget ? `${Math.round(ratio * 100)}% of ${money(budget, 0)} budget used` : 'Add a monthly budget in Settings'}</small>
+      <div class="overview-progress"><i style="width:${budget ? Math.min(ratio, 1) * 100 : 0}%"></i></div>
+      <svg class="overview-shape" viewBox="0 0 220 200" aria-hidden="true"><path d="${BLOB_PATHS[0]}"/></svg>
+      <span class="overview-emoji" aria-hidden="true">${primary ? emojiFor(primary) : '✨'}</span>
+    </article>
+    <article class="overview-card">
+      <div class="overview-icon soft-purple" aria-hidden="true">↗</div>
+      <span>Spent</span><strong>${money(st.spent, 0)}</strong>
+      <small>${transactionCount} expense${transactionCount === 1 ? '' : 's'} · ${money(averageDaily, 0)}/day</small>
+    </article>
+    <article class="overview-card">
+      <div class="overview-icon soft-lime" aria-hidden="true">◎</div>
+      <span>${isCurrent ? 'Safe each day' : 'Budget remaining'}</span><strong>${budget ? money(isCurrent ? safeDaily : Math.max(left, 0), 0) : '—'}</strong>
+      <small>${isCurrent ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} remaining` : rangeLabel(p, r)}</small>
+    </article>
+    <article class="overview-card">
+      <div class="overview-icon soft-blue" aria-hidden="true">＋</div>
+      <span>Income</span><strong>${money(st.income, 0)}</strong>
+      <small>${st.tx.length} total transaction${st.tx.length === 1 ? '' : 's'}</small>
+    </article>
+  </section>
   ${quickAdd(mst)}
-  <section class="box where"><h2>Summary by category <span>${rangeLabel(p, r)}</span></h2>
-    ${st.spent ? categorySummary(st.byCat, st.spent, p, S.anchor) : `<div class="empty">Nothing spent ${p === 'day' ? 'this day' : 'this ' + p} yet.<br>Tap a category above to log one.</div>`}
+  <section class="box home-trend chartbox chart">
+    <div class="trend-heading">
+      <div><span>Spending activity</span><strong>${money(st.spent, 0)}</strong><small>${rangeLabel(p, r)} · ${status.toLowerCase()}</small></div>
+      <button data-act="goinsights">Open insights ↗</button>
+    </div>
+    <div class="trend-layout">
+      <div class="trend-chart">
+        <div class="trend-legend"><span><i></i>Daily spend</span>${dailyBudget ? `<span>— ${money(dailyBudget, 0)} daily budget</span>` : ''}</div>
+        ${columns({ groups: chartGroups, series: [{ name: 'Spent', color: '#f8f8f3' }], ref: dailyBudget, showX: index => daily.length <= 8 || index === 0 || (index + 1) % 5 === 0 })}
+      </div>
+      <div class="trend-side">
+        <div class="trend-stat"><span>${projectionCopy}</span><strong>${money(projection, 0)}</strong><small>${budget ? projection > budget ? `${money(projection - budget, 0)} above budget` : `${money(budget - projection, 0)} below budget` : 'Budget not set'}</small></div>
+        <div class="trend-stat lime"><span>Daily allowance</span><strong>${budget && isCurrent ? money(safeDaily, 0) : '—'}</strong><small>${budget && isCurrent ? 'to stay within budget' : 'available in the current period'}</small></div>
+      </div>
+    </div>
+    <div class="tip"></div>
+  </section>
+  <section class="box where"><h2><span class="box-title">Summary by category</span><button data-act="goinsights">View all →</button></h2>
+    ${st.spent ? categorySummary(st.byCat, st.spent, p, S.anchor, 4) : `<div class="empty">Nothing spent ${p === 'day' ? 'this day' : 'this ' + p} yet.<br>Tap a category above to log one.</div>`}
   </section>
   <section class="box recent"><h2>Recent <button data-goto="history">See all</button></h2>
-    ${S.transactions.slice(0, 6).map(txRow).join('') || '<div class="empty">No transactions yet.</div>'}
+    ${S.transactions.slice(0, 5).map(txRow).join('') || '<div class="empty">No transactions yet.</div>'}
   </section>
-  ${tipCard(analyse(S.anchor))}
+  ${installmentCard()}
+  ${tipCard(analysis)}
   </div>`;
 }
 
@@ -460,6 +528,24 @@ function insightsView() {
   </div>`;
 }
 
+function installmentsView() {
+  const totals = planTotals(), pct = totals.total ? Math.round(totals.paid / totals.total * 100) : 0;
+  const active = S.plans.filter(p => planStats(p).remaining), complete = S.plans.filter(p => !planStats(p).remaining);
+  return `<div class="grid installments">
+    <section class="installment-overview">
+      <div class="installment-overview-top"><span>Payment progress</span><button data-act="newplan">+ Add plan</button></div>
+      <div class="installment-count"><strong>${totals.paid}</strong><span>of ${totals.total || 0} paid</span></div>
+      <div class="plan-overall-bar"><i style="width:${pct}%"></i></div>
+      <div class="installment-overview-meta"><span><small>Remaining</small><b>${money(totals.left, 0)}</b></span><span><small>Next payment</small><b>${totals.next ? planDateLabel(totals.next).replace(/^Next /, '') : '—'}</b></span></div>
+    </section>
+    <section class="box plan-list">
+      <h2><span class="box-title">Active plans</span><span class="box-meta">${active.length} ongoing</span></h2>
+      ${active.length ? active.map(p => planRow(p)).join('') : `<div class="plan-empty"><span>✨</span><b>Nothing left to pay</b><p>Add a plan when you split a purchase into monthly payments.</p><button class="btn sec2" data-act="newplan">Add installment plan</button></div>`}
+      ${complete.length ? `<div class="completed-heading">Paid off</div>${complete.map(p => planRow(p)).join('')}` : ''}
+    </section>
+  </div>`;
+}
+
 function historyView() {
   const pills = [['all', 'All'], ['expense', 'Expenses'], ['income', 'Income']];
   return `<div class="grid history">
@@ -485,7 +571,7 @@ function historyList() {
   return html;
 }
 
-const VIEWS = { home: homeView, month: monthView, year: yearView, insights: insightsView, history: historyView };
+const VIEWS = { home: homeView, month: monthView, year: yearView, insights: insightsView, history: historyView, installments: installmentsView };
 
 /* ---------- render ---------- */
 function render(anim = false) {
@@ -525,7 +611,7 @@ function applyChange(table, { eventType, new: n, old: o }) {
       S[table] = S[table].filter(x => x.id !== id);
       if (table === 'categories') S.transactions.forEach(t => { if (t.category_id === id) t.category_id = null; });
     } else if (n) upsertLocal(table, n);
-    if (table === 'categories') indexCats(); else S.transactions.sort(sortTx);
+    if (table === 'categories') indexCats(); else if (table === 'transactions') S.transactions.sort(sortTx);
   }
   scheduleRender();
 }
@@ -700,6 +786,62 @@ async function deleteCat(id) {
   } catch (e) { toast('Could not delete: ' + e.message); }
 }
 
+// --- installment plans
+function openPlan(plan = null) {
+  const expense = S.categories.find(c => c.type === 'expense');
+  S.planDraft = plan ? { ...plan } : { kind: 'instalment', name: '', amount: '', category_id: expense?.id || '', frequency: 'monthly', total_payments: 12, paid_before: 0, start_date: iso(today()), auto: false, auto_from: iso(today()), note: '' };
+  renderPlanSheet();
+}
+function readPlanInputs() {
+  if (!$('#planName')) return;
+  Object.assign(S.planDraft, {
+    name: $('#planName').value,
+    amount: $('#planAmount').value,
+    total_payments: $('#planTotal').value,
+    paid_before: $('#planPaid').value,
+    start_date: $('#planStart').value,
+    category_id: $('#planCategory').value,
+    note: $('#planNote').value,
+  });
+}
+function renderPlanSheet() {
+  const d = S.planDraft, categories = S.categories.filter(c => c.type === 'expense');
+  openSheet('plan', `
+    <div class="sheet-heading"><span class="eyebrow">${d.id ? 'Edit instalment' : 'New instalment'}</span><h2>${d.id ? 'Update the payment plan' : 'Track a payment plan'}</h2><p>Add the amount per payment and how many payments are expected.</p></div>
+    <label class="field"><span>Plan name</span><input id="planName" maxlength="60" placeholder="Laptop, phone, course…" value="${esc(d.name)}"></label>
+    <div class="row2 plan-form-grid">
+      <label class="field"><span>Amount per payment</span><input id="planAmount" inputmode="decimal" placeholder="0.00" value="${esc(d.amount)}"></label>
+      <label class="field"><span>Total payments</span><input id="planTotal" inputmode="numeric" placeholder="12" value="${esc(d.total_payments)}"></label>
+    </div>
+    <div class="row2 plan-form-grid">
+      <label class="field"><span>Already paid</span><input id="planPaid" inputmode="numeric" placeholder="0" value="${esc(d.paid_before)}"></label>
+      <label class="field"><span>First payment date</span><input id="planStart" type="date" value="${esc(d.start_date)}"></label>
+    </div>
+    <label class="field"><span>Expense category</span><select id="planCategory">${categories.map(c => `<option value="${c.id}" ${d.category_id === c.id ? 'selected' : ''}>${emojiFor(c)} ${esc(c.name)}</option>`).join('')}</select></label>
+    <label class="field"><span>Note <small>Optional</small></span><input id="planNote" maxlength="200" placeholder="Store, item details, account…" value="${esc(d.note || '')}"></label>
+    <button class="btn lime" data-act="saveplan">Save instalment plan</button>
+    ${d.id ? '<button class="btn ghost" data-act="delplan" style="margin-top:10px">Delete plan</button>' : ''}`);
+}
+async function savePlan() {
+  readPlanInputs();
+  const d = S.planDraft, name = d.name.trim(), amount = Number(String(d.amount).replace(/,/g, '')), total = Math.floor(Number(d.total_payments)), paid = Math.floor(Number(d.paid_before));
+  if (!name) return toast('Give the plan a name');
+  if (!(amount > 0)) return toast('Payment amount must be greater than zero');
+  if (!(total >= 1)) return toast('Enter the total number of payments');
+  if (!(paid >= 0 && paid <= total)) return toast('Paid payments must be between 0 and the total');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.start_date)) return toast('Choose the first payment date');
+  if (!d.category_id) return toast('Choose an expense category');
+  const row = { kind: 'instalment', name, amount: Math.round(amount * 100) / 100, category_id: d.category_id, frequency: 'monthly', total_payments: total, paid_before: paid, start_date: d.start_date, auto: false, auto_from: d.start_date, note: d.note.trim() || null };
+  try {
+    const saved = d.id ? await S.db.update('plans', d.id, row) : await S.db.insert('plans', row);
+    upsertLocal('plans', saved); closeSheet(); haptic(); toast('Instalment plan saved'); render();
+  } catch (e) { toast('Could not save plan: ' + e.message); }
+}
+async function deletePlan(id) {
+  try { await S.db.remove('plans', id); S.plans = S.plans.filter(p => p.id !== id); closeSheet(); toast('Plan deleted'); render(); }
+  catch (e) { toast('Could not delete plan: ' + e.message); }
+}
+
 // --- settings
 const dbName = () => S.db.kind === 'sheets' ? 'Google Sheet' : 'Supabase';
 function openMore() {
@@ -709,6 +851,7 @@ function openMore() {
   openSheet('more', `
     <div class="sheet-heading"><span class="eyebrow">Explore</span><h2>More ways to understand your money</h2><p>Open a report or manage how the app works.</p></div>
     <div class="more-grid">
+      <button data-act="moreplans"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 9h8M8 13h5M8 17h3"/></svg><span><b>Instalments</b><small>Payment progress and due dates</small></span></button>
       <button data-act="moremonth"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="3"/><path d="M7 3v4M17 3v4M4 10h16M8 14h2M14 14h2M8 17h2"/></svg><span><b>Month</b><small>Daily spending and budgets</small></span></button>
       <button data-act="moreyear"><svg viewBox="0 0 24 24"><path d="M5 20V11M10 20V5M15 20v-7M20 20V8"/><path d="M3 20.5h19"/></svg><span><b>Year</b><small>Income and spending trends</small></span></button>
       <button data-act="moresettings"><svg viewBox="0 0 24 24"><path d="M12 3.5c1.4 0 1.7 1.8 2.9 2.3 1.2.5 2.7-.6 3.7.4 1 1-.1 2.5.4 3.7.5 1.2 2.3 1.5 2.3 2.9s-1.8 1.7-2.3 2.9c-.5 1.2.6 2.7-.4 3.7-1 1-2.5-.1-3.7.4-1.2.5-1.5 2.3-2.9 2.3s-1.7-1.8-2.9-2.3c-1.2-.5-2.7.6-3.7-.4-1-1 .1-2.5-.4-3.7-.5-1.2-2.3-1.5-2.3-2.9s1.8-1.7 2.3-2.9c.5-1.2-.6-2.7.4-3.7 1-1 2.5.1 3.7-.4 1.2-.5 1.5-2.3 2.9-2.3Z"/><circle cx="12" cy="12" r="3"/></svg><span><b>Settings</b><small>Budgets, categories and data</small></span></button>
@@ -796,6 +939,9 @@ $('#view').addEventListener('click', e => {
     case 'quickinc': openTx(null, { type: 'income' }); break;
     case 'quickmore': openTx(); break;
     case 'goinsights': go('insights'); break;
+    case 'goplans': go('installments'); break;
+    case 'newplan': openPlan(); break;
+    case 'plan': { const p = S.plans.find(x => x.id === id); if (p) openPlan(p); break; }
     case 'cat': S.hist = { type: 'expense', cat: id, q: '', limit: 150 }; go('history'); break;
     case 'catinc': S.hist = { type: 'income', cat: id, q: '', limit: 150 }; go('history'); break;
     case 'editcat': if (id === '__overall') openSettings(); else if (id) openCat(S.catMap.get(id)); break;
@@ -822,7 +968,7 @@ $('#sheet').addEventListener('click', e => {
       $('#sheet').querySelectorAll('.catpick button').forEach(x => x.classList.toggle('on', x === b));
       $('#sugg').innerHTML = suggHTML(); updateTxValidity(); setTxError(); break;
     }
-    case 'sugg': { const s = S.sugg[+b.dataset.i]; if (!s) break; $('#amt').value = String(s.amount); $('#note').value = s.note; sizeAmt(); tick(); break; }
+    case 'sugg': { const s = S.sugg[+b.dataset.i]; if (!s) break; $('#amt').value = String(s.amount); $('#note').value = s.note; sizeAmt(); updateTxValidity(); setTxError(); tick(); break; }
     case 'key': keypad(k); break;
     case 'txdate': $('#dateField').classList.toggle('hidden'); if (!$('#dateField').classList.contains('hidden')) $('#when').focus(); break;
     case 'newcat': readTxInputs(); openCat(null, S.draft.type, 'tx'); break;
@@ -833,6 +979,8 @@ $('#sheet').addEventListener('click', e => {
     case 'ccolor': readCatInputs(); S.catDraft.color = k; renderCatSheet(); break;
     case 'savecat': saveCat(); break;
     case 'delcat': if (confirm2('cat', 'Tap again: past entries become Uncategorised')) deleteCat(S.catDraft.id); break;
+    case 'saveplan': savePlan(); break;
+    case 'delplan': if (confirm2('plan', 'Tap again to delete this plan')) deletePlan(S.planDraft.id); break;
     case 'addcat': openCat(null, 'expense', 'settings'); break;
     case 'setcat': openCat(S.catMap.get(id), 'expense', 'settings'); break;
     case 'theme': localStorage.setItem('spend-theme', k); applyTheme(); openSettings(); break;
@@ -842,6 +990,7 @@ $('#sheet').addEventListener('click', e => {
     case 'signout': S.db.signOut().then(() => location.reload()); break;
     case 'moremonth': closeSheet(); go('month'); break;
     case 'moreyear': closeSheet(); go('year'); break;
+    case 'moreplans': closeSheet(); go('installments'); break;
     case 'moresettings': openSettings(); break;
     case 'goinsights': closeSheet(); go('insights'); break;
     case 'close': closeSheet(); break;
@@ -873,8 +1022,29 @@ function applyTheme() {
   if (t === 'auto' && inTG) t = tg.colorScheme;
   if (t === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
 }
+let startupLoaderShownAt = 0, startupLoaderTimer = null;
+function showStartupLoader() {
+  if (!inTG) return;
+  const loader = $('#startupLoader'); if (!loader) return;
+  clearTimeout(startupLoaderTimer); startupLoaderShownAt = performance.now();
+  loader.classList.remove('leaving'); loader.classList.add('show');
+  document.body.classList.add('startup-loading');
+}
+function hideStartupLoader() {
+  const loader = $('#startupLoader'); if (!loader?.classList.contains('show')) return;
+  const wait = Math.max(0, 850 - (performance.now() - startupLoaderShownAt));
+  clearTimeout(startupLoaderTimer);
+  startupLoaderTimer = setTimeout(() => {
+    loader.classList.add('leaving');
+    setTimeout(() => {
+      loader.classList.remove('show', 'leaving');
+      document.body.classList.remove('startup-loading');
+    }, 360);
+  }, wait);
+}
 function initTelegram() {
   if (!inTG) return;
+  showStartupLoader();
   try {
     tg.ready(); tg.expand();
     tg.MainButton.setParams({ color: '#E9F25B', text_color: '#0F0F0F' });
@@ -895,9 +1065,11 @@ async function start() {
     Object.assign(S, await S.db.load()); indexCats(); S.transactions.sort(sortTx);
     S.db.subscribe(applyChange, setLive);
     render(true);
+    hideStartupLoader();
   } catch (e) {
     console.error(e);
     $('#view').innerHTML = `<div class="empty">Couldn't load your data.<br><small>${esc(e.message)}</small><br><br>${S.db?.kind === 'sheets' ? 'Check the Google Sheet web app is deployed and you ran setup().' : 'Did you run <code>supabase/schema.sql</code>?'}</div><div style="padding:0 20px"><button class="btn sec2" onclick="localStorage.removeItem('spend-config');location.reload()">Change database</button></div>`;
+    hideStartupLoader();
   }
 }
 
@@ -905,14 +1077,14 @@ async function boot() {
   initTelegram(); applyTheme();
   let cfg = null; try { cfg = JSON.parse(localStorage.getItem('spend-config')); } catch {}
   cfg = cfg || window.SPEND_CONFIG || null;
-  if (!cfg) return show('setup');
+  if (!cfg) { show('setup'); hideStartupLoader(); return; }
   if (cfg.mode === 'demo') { S.db = new SpendDB.DemoDB(); return start(); }
-  if (!window.supabase) { show('setup'); $('#setupErr').textContent = 'Could not load the Supabase library. Check your connection.'; return; }
+  if (!window.supabase) { show('setup'); $('#setupErr').textContent = 'Could not load the Supabase library. Check your connection.'; hideStartupLoader(); return; }
   S.db = new SpendDB.SupabaseDB(cfg.url, cfg.key);
   // Supabase may complete a magic-link sign-in asynchronously; defer work out of the auth callback.
   S.db.onAuth(s => setTimeout(() => { if (s && !S.started) start(); else if (!s && S.started) location.reload(); }, 0));
   const session = await S.db.session().catch(() => null);
-  if (session) start(); else if (!S.started) show('auth');
+  if (session) start(); else if (!S.started) { show('auth'); hideStartupLoader(); }
 }
 
 /* setup screen */
@@ -947,4 +1119,9 @@ $('#code').addEventListener('keydown', e => { if (e.key === 'Enter') $('#authBtn
 $('#email').addEventListener('keydown', e => { if (e.key === 'Enter') $('#authBtn').click(); });
 $('#authBack').onclick = () => { localStorage.removeItem('spend-config'); location.reload(); };
 
-boot();
+boot().catch(e => {
+  console.error('Boot failed', e);
+  show('setup');
+  $('#setupErr').textContent = 'The app could not start. Please try again.';
+  hideStartupLoader();
+});
